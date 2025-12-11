@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 sofa-analyzer
-分析SOFA文件并列出其中直接记载的测量点位
+分析SOFA文件并列出其中直接记载的测量点位及距离信息
 
-功能：读取SOFA文件，显示人头前方90度范围内的所有测量点位
+功能：读取SOFA文件，显示人头前方90度范围内的所有测量点位，以及文件包含的距离数据
 
 依赖库：
     - pysofaconventions
     - numpy
     - netCDF4
     
-版本：1.1.0
+版本：1.2.0
 作者：tunwen0
 """
 
@@ -25,7 +25,7 @@ from collections import defaultdict
 warnings.filterwarnings('ignore')
 
 # 程序版本
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # ============================================================
 # 库导入检查
@@ -102,10 +102,9 @@ def get_source_positions(sofa):
     positions = sofa.getSourcePositionValues()
     
     # ============================================================
-    # 维度检查与处理 (改进部分)
+    # 维度检查与处理
     # ============================================================
-    # SOFA文件可能包含多个接收器 (M, R, C)，例如 (测量点数, 2耳, 3坐标)
-    # 如果是这种情况，我们通常取第一个接收器(R=0)的数据作为声源位置参考
+    # SOFA文件可能包含多个接收器 (M, R, C)
     if positions.ndim == 3:
         positions = positions[:, 0, :]
     
@@ -124,11 +123,8 @@ def get_source_positions(sofa):
             distance = np.sqrt(x**2 + y**2 + z**2)
             
             if distance < 1e-10:
-                # 距离极小，视为原点
                 spherical_positions.append([0.0, 0.0, 0.0])
             else:
-                # 使用 np.clip 确保数值在 [-1, 1] 之间，防止浮点误差导致 arcsin 报错
-                # (这也是之前提到的数值稳定性优化)
                 sin_val = np.clip(z / distance, -1.0, 1.0)
                 elevation = np.degrees(np.arcsin(sin_val))
                 azimuth = np.degrees(np.arctan2(y, x))
@@ -152,10 +148,8 @@ def normalize_azimuth(azimuth):
 def format_azimuth(azimuth):
     """
     格式化方位角显示
-    SOFA约定：正值向左，负值向右
     """
     azimuth = round(azimuth, 1)
-    # 去除不必要的小数位
     if azimuth == int(azimuth):
         azimuth = int(azimuth)
     
@@ -183,17 +177,45 @@ def format_elevation(elevation):
         return f"{elevation}°"
 
 
+def format_distance(distance):
+    """
+    格式化距离显示
+    去除不必要的小数点（如 3.0 -> 3）
+    """
+    # 保留2位小数进行判断，避免极小浮点误差
+    d_rounded = round(distance, 2)
+    if d_rounded == int(d_rounded):
+        return str(int(d_rounded))
+    return str(d_rounded)
+
+
+def analyze_distances(positions):
+    """
+    提取并分析唯一的距离值
+    
+    参数：
+        positions: numpy数组 (M, 3)，[azimuth, elevation, distance]
+        
+    返回：
+        sorted_distances: 排序后的唯一距离列表
+    """
+    # 提取距离列 (索引2)
+    raw_distances = positions[:, 2]
+    
+    unique_dists = set()
+    for d in raw_distances:
+        # 为了处理浮点误差，保留2位小数 (精确到厘米)进行去重
+        # 如果需要更精确，可以调整 round 的位数
+        unique_dists.add(round(d, 2))
+    
+    # 排序
+    sorted_distances = sorted(list(unique_dists))
+    return sorted_distances
+
+
 def analyze_front_positions(positions):
     """
     分析人头前方90度范围内的点位
-    
-    前方90度范围定义：
-    - 方位角绝对值 <= 90°，即 -90° <= azimuth <= +90°
-    
-    返回：
-        grouped_positions: 按俯仰角分组的字典
-            key: 俯仰角
-            value: 方位角集合
     """
     grouped = defaultdict(set)
     
@@ -203,7 +225,6 @@ def analyze_front_positions(positions):
         
         # 筛选前方90度范围（方位角绝对值 <= 90°）
         if -90 <= azimuth <= 90:
-            # 四舍五入到1位小数
             az_rounded = round(azimuth, 1)
             el_rounded = round(elevation, 1)
             grouped[el_rounded].add(az_rounded)
@@ -214,51 +235,38 @@ def analyze_front_positions(positions):
 def sort_azimuths(azimuths):
     """
     对方位角列表进行排序
-    排序规则：0°排最前面，然后正负交替排列
-    例如：0°, +10°, -10°, +20°, -20°, ...
     """
     azimuths = list(azimuths)
-    
-    # 分离0°、正值和负值
     zeros = [a for a in azimuths if a == 0]
     positives = sorted([a for a in azimuths if a > 0])
     negatives = sorted([a for a in azimuths if a < 0], key=lambda x: abs(x))
     
-    # 交替排列
     result = zeros.copy()
-    
     max_len = max(len(positives), len(negatives)) if positives or negatives else 0
     for i in range(max_len):
         if i < len(positives):
             result.append(positives[i])
         if i < len(negatives):
             result.append(negatives[i])
-    
     return result
 
 
 def sort_elevations(elevations):
     """
     对俯仰角列表进行排序
-    排序规则：0°排最前面，然后正负交替排列
     """
     elevations = list(elevations)
-    
-    # 分离0°、正值和负值
     zeros = [e for e in elevations if e == 0]
     positives = sorted([e for e in elevations if e > 0])
     negatives = sorted([e for e in elevations if e < 0], key=lambda x: abs(x))
     
-    # 交替排列
     result = zeros.copy()
-    
     max_len = max(len(positives), len(negatives)) if positives or negatives else 0
     for i in range(max_len):
         if i < len(positives):
             result.append(positives[i])
         if i < len(negatives):
             result.append(negatives[i])
-    
     return result
 
 
@@ -318,7 +326,6 @@ def main():
     """主程序入口"""
     
     while True:
-        # 清屏并打印头部
         clear_screen()
         print_header()
         
@@ -330,36 +337,25 @@ def main():
         print()
         
         sofa_path = input(">>> ").strip()
-        
-        # 去除可能的引号
         sofa_path = sofa_path.strip('"').strip("'")
         
-        # 检查输入是否为空
         if not sofa_path:
-            print()
-            print("错误：请输入有效的文件路径")
-            print()
+            print("\n错误：请输入有效的文件路径\n")
             input("按回车键继续...")
             continue
         
-        # 检查文件是否存在
         if not os.path.exists(sofa_path):
-            print()
-            print(f"错误：文件不存在")
-            print(f"路径：{sofa_path}")
-            print()
+            print(f"\n错误：文件不存在\n路径：{sofa_path}\n")
             input("按回车键继续...")
             continue
         
         # ============================================================
         # 第二步：加载和分析SOFA文件
         # ============================================================
-        print()
-        print("正在加载和分析SOFA文件...")
+        print("\n正在加载和分析SOFA文件...")
         
         sofa = load_sofa_file(sofa_path)
         if sofa is None:
-            print()
             input("按回车键继续...")
             continue
         
@@ -370,13 +366,14 @@ def main():
             # 获取总测量点数
             total_points = len(positions)
             
+            # 【新增功能】分析距离信息
+            unique_distances = analyze_distances(positions)
+            
             # 分析前方90度范围内的点位
             grouped_positions = analyze_front_positions(positions)
             
-            # 计算前方点位数
+            # 计算统计数据
             front_points = sum(len(azs) for azs in grouped_positions.values())
-            
-            # 计算俯仰角数量
             elevation_count = len(grouped_positions)
             
             # 关闭SOFA文件
@@ -391,6 +388,12 @@ def main():
             print()
             print(f"导入成功。该文件共记载了 {total_points} 个测量点位。")
             print()
+            
+            # 【新增功能】显示距离信息
+            dist_str = "，".join([f"{format_distance(d)}米" for d in unique_distances])
+            print(f"SOFA文件内包含以下距离数据，其余距离需要靠计算得出：{dist_str}")
+            print()
+            
             print(f"其中，人头前方90度范围内共有 {front_points} 个点位")
             print(f"（分布在 {elevation_count} 个俯仰角上）：")
             
@@ -401,11 +404,8 @@ def main():
             
         except Exception as e:
             print(f"错误：分析SOFA文件时出错 - {e}")
-            print()
-            # 打印详细错误堆栈，方便调试
             import traceback
             traceback.print_exc()
-            
             try:
                 sofa.close()
             except:
@@ -422,17 +422,11 @@ def main():
         
         try:
             choice = input(">>> ").strip()
-            
             if choice == "2":
-                print()
-                print("感谢使用 sofa-analyzer，再见！")
-                print()
+                print("\n感谢使用 sofa-analyzer，再见！\n")
                 break
-            # 其他任何输入都继续循环
-            
         except (KeyboardInterrupt, EOFError):
-            print()
-            print("程序已退出。")
+            print("\n程序已退出。")
             break
 
 
